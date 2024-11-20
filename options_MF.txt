@@ -1,0 +1,2 @@
+threshold_peak,threshold_mass,threshold_sim_1,threshold_sim_2,xwindow,ywindow
+0.001,0.01,0.75,0.6,12,6

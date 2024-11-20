@@ -1,0 +1,2 @@
+MaxIter,ConvCrit,Constr_1,Constr_2,Init,classify
+1000,1e-07,1,1,0,0

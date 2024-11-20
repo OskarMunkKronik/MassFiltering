@@ -360,7 +360,7 @@ classdef DataAnalysis_class
 
         end
 
-        function obj = run_mcr(obj,filtered)
+        function obj = run_mcr(obj,filtered,model_type)
 
             cd(obj.BasePath)
 
@@ -401,13 +401,24 @@ classdef DataAnalysis_class
                     if ~(length(size(data)) < 3 | min(size(data)) < 2)
                         Fac = obj.options_SIT.Fac(ii,i);
 
-                        cd('C:\Users\schneP18\Documents\GitHub\PARADISe\Online versions\Ver6.0\');
-                        for iii = 1:5
-                            model{iii} = Alg.SIT_MCR(data,Fac,options);
-                            display(['compound: ' num2str(i) '/' num2str(size(obj.SuspectList.suspect_info_masses,1)) ' mode: ' num2str(ii) ' model: ' num2str(iii)])
+                        if model_type == "MCR"
+
+                            for iii = 1:5
+                                model{iii} = SIT_MCR(data,Fac,options);
+                                display(['compound: ' num2str(i) '/' num2str(size(obj.SuspectList.suspect_info_masses,1)) ' mode: ' num2str(ii) ' model: ' num2str(iii)])
+                            end
+
+                            cd(obj.BasePath)
+                            cd(obj.SuspectList.suspect_info_id{i})
+                        elseif model_type == "SIT"
+                            for iii = 1:5
+                                model{iii} = SIT(data,Fac,options);
+                                display(['compound: ' num2str(i) '/' num2str(size(obj.SuspectList.suspect_info_masses,1)) ' mode: ' num2str(ii) ' model: ' num2str(iii)])
+                            end
+                            cd(obj.BasePath)
+                            cd(obj.SuspectList.suspect_info_id{i})
+
                         end
-                        cd(obj.BasePath)
-                        cd(obj.SuspectList.suspect_info_id{i})
 
                         [sp,Xhat] = obj.createOutputFromModel(model,ind_mz_target);
 
@@ -538,6 +549,1318 @@ classdef DataAnalysis_class
 
 
     methods(Static)
+
+
+        function model = SIT(X,Fac,options)
+
+            % I/O
+            %
+            % I:
+            % X(elutiontimes x samples x spectral chanels) = Low rank chromatographic data set
+            % Fac = Number of latent variables to be fitted
+            % options.MaxIter   :   maximum number of iterations (default = 1000)
+            % options.ConvCrit  :   convergence criterion (default = 1e-09)
+            % options.Constr    :   [Spectra, Elutionprofiles&Scores]
+            %                       e.g [1 1] (default)
+            %                       0 = unconstrained
+            %                       1 = non-negativity
+            % options.Init      :   Initialization
+            %                   :   0 = random
+            %                   :   1 = pure sample (default)
+            %                   :   2 = custom (requires options.InitLoads)
+            % options.InitLoads :   insert customized Loadings
+            % options.classify  :   1 = Runs a DeepNeuralNetwork to classify
+            %                           elutionprofiles as '0=weird, 1=peak, 2=cutoff, 3=baseline';
+            % options.PeakshapeCorrection : If set to vals > 1, tri-linearity
+            %                               constraint is relaxed.
+            % options.compression : makes sense if size(X,i)*size(X,j) << size(X,k)
+            % options.compression.do : 0 = no compression, 1 = compression
+            % options.compression.basis: orthogonal basis for compression
+            %
+            %O:
+            %model.spectra                      = (Fac x spectral chanels)
+            %model.elutionprofiles              = (elutiontimes x Fac x samples)
+            %model.scores                       = (Fac x samples)
+            %model.detail.fit.X_sum_sq          = Total Sum of Squares;
+            %model.detail.fit.res_sum_sq        = Residual Sum of Squares;
+            %model.detail.fit.PercVar           = Explained Variance [%];
+            %model.detail.fit.fitdif            = Final difference in Fit;
+            %model.detail.lossfunc              = Loss Function values over all iterations;
+            %model.detail.lossfunc_dif          = Fit difference over all iterations;
+            %model.detail.residuals             = Residuals in dimensions of input data;
+            %model.detail.iterations            = Number of Iterations
+            %model.detail.time                  = Computation time;
+            %model.detail.Profiles.PeakType     = PeakType
+            %model.detail.Profiles.Niceness     = Niceness
+            %model.detail.Profiles.PeakTypeHelp = '0 = weird, 1 = peak, 2 = cutoff, 3 = baseline';
+
+
+            %% Unfold X
+            X1 = X;
+            mgc    = size(X1);
+
+            X1 = reshape(X1,[mgc(1)*mgc(2) mgc(3)]);
+            %'Mode 1 is elution time * sample
+            %'Mode 2 is m/z fragments
+            %% Arguments and option settings
+            tic()
+            ncomp           = Fac;
+            if nargin < 3
+                init        = 1;
+                maxit       = 1000;
+                constr      = [1 1];
+                convcrit    = 1e-09;
+                pccf        = 1;
+            else
+                if isfield(options,'Init')
+                    init        = options.Init;
+                else
+                    init    = 0;
+                end
+                maxit       = options.MaxIter;
+                if isfield(options,'Constr')
+                    constr      = options.Constr;
+                else
+                    constr = [1 1];
+                end
+                convcrit    = options.ConvCrit;
+                if isfield(options,'PeakshapeCorrection')
+                    pccf        = options.PeakshapeCorrection;
+                else
+                    pccf = 1;
+                end
+                if isfield(options,'compression')
+                    compression = options.compression.do;
+                    basis_f     = options.compression.basis;
+                else
+                    compression = 0;
+                end
+
+                if ~isfield(options,'classify');
+                    options.classify = 1;
+                end
+            end
+
+            %% Initialization of S or C
+            % pure sample / spectra
+
+            if init == 0
+                CB = randn(size(X1,1),ncomp);
+            elseif init == 1
+                [CB0,ind]=pure(X1,ncomp,10);
+                CB = CB0';
+                [S0,ind]=pure(X1',ncomp,10);
+                S = S0';
+            elseif init == 2
+                S = options.InitLoads;
+                StS = S'*S;
+                StXt = S'*X1';
+                CB = fcnnls([],[],StS,StXt)';
+            end
+
+            SST = sum(X1.^2,'all');
+            SSE = zeros(1,2);
+            SSE(1) = 2*SST;
+            SSE(2) = SST;
+            fitdif = SSE(1)-SSE(2);
+            fit = [];
+            iter = [];
+            tictic = 0;
+
+            %% calculating mcr solution
+            % X = CS'
+            % S has Norm 1
+            % S = S/||S||
+            % X*S*pinv(S'S) = C --> pinv(S'S)*S'X' = C;
+            % pinv(C'C)*C'*X = S --> pinv(C'C)*C'*X = S;
+            it = 0;
+            while fitdif > convcrit & it < maxit
+                it = it+1;
+                CtC = CB'*CB;
+                CtX = CB'*X1;
+                if      constr(1) == 0
+                    S = CtX'*pinv(CtC);
+                    S(S<0) = 0;
+                elseif  constr(1) == 1
+                    if compression == 0
+                        try
+                            S = fcnnls(CB, X1, CtC, CtX)';
+                            for k =1:ncomp
+                                if sum(S(:,k)) == 0
+                                    S(:,k) = rand(1,size(S,1));
+                                end
+                            end
+                        catch
+                            CB = randn(size(CB));
+                            CtC = CB'*CB;
+                            CtX = CB'*X1;
+                            S = fcnnls(CB, X1, CtC, CtX)';
+                        end
+                    elseif compression == 1
+                        E = CB;
+                        f = X1;
+                        for jj = 1:Fac
+                            S(jj,:) = LSI(E,f(:,jj),basis_f,0);
+                        end
+                    end
+                    for k = 1:ncomp
+                        S(:,k) = S(:,k)*1/norm(S(:,k),'fro');
+                    end
+                end
+                StS = S'*S;
+                StXt = S'*X1';
+                if      constr(2) == 0
+                    CB = StXt'*pinv(StS);
+                    CB(CB<0) = 0;
+                elseif  constr(2) == 1
+                    try
+                        CB = fcnnls([],[],StS,StXt)';
+                    catch
+                        S = randn(size(S));
+                        for k = 1:ncomp
+                            S(:,k) = S(:,k)*1/norm(S(:,k),'fro');
+                        end
+                        StS = S'*S;
+                        StXt = S'*X1';
+                        CB = fcnnls([],[],StS,StXt)';
+                    end
+                end
+
+
+                %% Shift invariant trilinearity on CB
+                copt1 = [];
+                Bft = [];
+                Cft = [];
+                Bneu = {};
+                Cneu = [];
+
+                for j = 1:ncomp;
+
+                    [y,ya,p]= shiftmap(reshape(CB(:,j),mgc(1),mgc(2)));%shiftmap(copt1');
+                    %making trilinearity for shifted data
+
+                    [U,T,V] = svd(y,'econ');
+
+                    %         if fitdif(end) < 100*convcrit | tictic > 0
+                    %             tictic = 1;
+                    %             ttemp = diag(T);
+                    %             indstemp = find(ttemp./sum(ttemp) > 0.01);
+                    %             if 1 > max(indstemp);
+                    %                 pccf = 1;
+                    %             else
+                    %                 pccf = max(indstemp);
+                    %             end
+                    %         else
+                    %             pccf = 1;
+                    %         end
+                    %         try
+                    %             dif1(j,it) = pccf;
+                    %         end
+                    %trying flexibilisation of SIT
+                    %                     ttemp = diag(T);
+                    %                     indstemp = find(ttemp./sum(ttemp) > 0.01);
+                    %                     if 1 > max(indstemp);
+                    %                         pccf = 1;
+                    %                     else
+                    %                     pccf = max(indstemp);
+                    %                     end
+                    %         dif1(j,it) = pccf;
+                    %         pccf = 1;
+                    %storing results as elutionprofiles and relative concentrations
+                    Bft = U(:,1:pccf)*T(1:pccf,1:pccf);
+                    Cft = V(:,1:pccf)';
+                    %shifting back
+                    Bneu{1,j} = shiftmap(Bft*Cft,ya);
+                    Bneu{1,j} = Bneu{1,j}(1:mgc(1),:);
+                end
+                %reshaping to get CB back
+                BB = zeros(mgc(1),mgc(2), ncomp);
+                for i = 1:(ncomp)
+                    BB(:,:,i) = Bneu{1,i};
+                end
+                %           zeroforcing !!!! Spielwiese !!!!
+                CBneu = reshape(BB,mgc(1)*mgc(2),ncomp);
+                CB = CBneu;
+
+
+                %evaluating loss function
+                SSE(2) = SSE(1);
+                %SSE(1) = sum((X1-CB*S').^2,'all');
+                SSE(1) = SST+sum(sum((CB'*CB) .*(S'*S)))-2*sum((X1*S) .* CB,'all');
+                fit(it) = (1-SSE(1)/SST)*100;
+                fitdif(it) = abs((1-SSE(2)/SST)*100-(1-SSE(1)/SST)*100);
+
+            end
+            %Outputs
+            % StS = S'*S;
+            % StXt = S'*X1';
+            % CB = Alg.fcnnls([],[],StS,StXt)';
+            CB = reshape(CB,mgc(1),mgc(2),ncomp);
+            model.spectra   = S;
+            for i = 1:size(CB ,3)
+                for ii = 1:size(CB ,2)
+                    Cneu(ii,i) = norm(squeeze(CB(:,ii,i)),'fro');
+                    CB(:,ii,i) = CB(:,ii,i)./Cneu(ii,i);
+                end
+            end
+            model.elutionprofiles  = CB;
+            model.elutionprofiles  = permute(model.elutionprofiles,[1 3 2]);
+            % for i = 1:size(BB,3)
+            %     for ii = 1:size(BB,2)
+            %         Cneu(ii,i) = norm(squeeze(BB(:,ii,i)),'fro');
+            %     end
+            % end
+            model.scores   = Cneu;
+
+            model.detail.fit.X_sum_sq        = SST;
+            model.detail.fit.res_sum_sq      = SSE(1);
+            model.detail.fit.PercVar         = fit(end);
+            model.detail.fit.fitdif          = fitdif(end);
+            % model.detail.dif1                = dif1;
+            % model.detail.lossfunc          = fit;
+            % model.detail.lossfunc_dif      = fitdif;
+            %         % !!! Spielwiese
+            % model.detail.dif1              = dif1;
+            % model.detail.dif2              = dif2;
+            % Xhat                = makeXfromABC(model.spectra,model.elutionprofiles,model.scores);
+            % model.detail.residuals     = permute(X,[2 1 3])-Xhat;
+
+            model.detail.iterations    = it;
+            model.detail.time          = toc()
+            if options.classify == 1
+                load('DeepNet2018b_1.mat');
+                [~,PeakType,Niceness] = assessprof(model.elutionprofiles ,FinalDeepNet);
+                model.detail.Profiles.PeakType = PeakType;
+                model.detail.Profiles.Niceness = Niceness;
+                model.detail.Profiles.PeakTypeHelp = '0 = weird, 1 = peak, 2 = cutoff, 3 = baseline';
+            end
+
+
+
+
+
+            %%
+
+
+            function [y,ya,p] = shiftmap(x,p)
+                %
+                %  For calculating |fft| and phase map:
+                %  INPUTS:
+                %     x = MxN operates on the columns
+                %  OPTIONAL INPUT:
+                %     p = nonnegative scalar length of padding for fft
+                %         if not included p = 2.^nextpow2(M);
+                %  OUTPUTS:
+                %     y = |fft(x)|
+                %    ya = phase map of FFT: fft(x)./|fft(x)|
+                %     p = p = 2.^nextpow2(n); [used when (p) not input].
+                %
+                %I/O: [y,ya,p] = shiftmap(x,p);
+                %
+                %  For calculating shifted profiles from |fft| and phase map:
+                %  INPUTS:
+                %     y = |fft(xhat)|, e.g., Xhat from a 1 PC PCA model of |FFT(x)|
+                %    ya = phase map of FFT: fft(x)./|fft(x)|
+                %  OUTPUTS:
+                %     x = real(ifft(y.*ya))
+                %
+                %I/O: [x] = shiftmap(y,ya);
+
+                yr    = 1e-6;             %regularization for angle map
+
+                m     = size(x);
+
+                if nargin<2||isscalar(p)  %calculate |FFT| and angle map
+                    if nargin<2
+                        p   = 2.^nextpow2(m(1));
+                    end
+
+                    % FFT
+                    %             if isdataset(x)
+                    %                 z   = fft(x.data,p);
+                    %             else
+                    %     z   = fft(x,p);       %assume x is class double
+                    z = fft(x);
+                    %             end
+                    % |FFT| and angle map
+                    y     = abs(z);
+                    a     = y;
+                    a(y<yr)   = yr;
+                    ya    = z./a;
+                else %p = ya (phase map)
+
+                    % IFFT
+                    %             if isdataset(x)
+                    %                 y   = real(ifft(x.data.*p));
+                    %             else
+                    y   = real(ifft(x.*p));   %assume x is class double
+                    %            end
+                    ya    = [];
+                    p     = [];
+
+
+                end
+            end
+
+            function [sp,imp]=pure(d,nr,f)
+                % [sp,imp]=pure(d,nr,f)
+                % sp purest row/column profiles
+                % imp indexes of purest variables
+                % d data matrix; nr (rank) number of pure components to search
+                % if d(nspectra,nwave) imp gives purest nwave => sp are conc. profiles (nr,nspectra)
+                % if d(nwave,nspectra) imp gives purest nspectra => sp are spectra profiles (nr,nwave)
+                % f percent of noise allowed respect maximum of the average spectrum given in % (i.e. 1% or 0.1%))
+
+                [nrow,ncol]=size(d);
+
+
+                % calculation of the purity spectrum
+
+                f=f/100;
+                s=std(d);
+                m=mean(d);
+                ll=s.*s+m.*m;
+                f=max(m)*f;
+                p=s./(m+f);
+
+                [mp,imp(1)]=max(p);
+
+                % calculation of the correlation matrix
+                % l=sqrt(m.*m+(s+f).*(s+f));
+
+                l=sqrt((s.*s+(m+f).*(m+f)));
+                % dl=d./(l'*ones(1,ncol));
+                for j=1:ncol,
+                    dl(:,j)=d(:,j)./l(j);
+                end
+                c=(dl'*dl)./nrow;
+
+                % calculation of the weights
+                % first weight
+
+                w(1,:)=ll./(l.*l);
+                p(1,:)=w(1,:).*p(1,:);
+                s(1,:)=w(1,:).*s(1,:);
+                % figure(1)
+                % subplot(3,1,1),plot(m)
+                % title('unweigthed mean, std and first pure spectrum')
+                % subplot(3,1,2),plot(s)
+                % subplot(3,1,3),plot(p)
+
+                % pause
+
+                % next weights
+
+
+                for i=2:nr,
+
+                    for j=1:ncol,
+                        [dm]=wmat(c,imp,i,j);
+                        w(i,j)=det(dm);
+                        p(i,j)=p(1,j).*w(i,j);
+                        s(i,j)=s(1,j).*w(i,j);
+                    end
+
+                    % next purest and standard deviation spectrum
+
+                    % plot(p(i,:))
+                    % plot(s(i,:))
+                    % title('sd and purest spectrum')
+                    % figure(i)
+                    % subplot(2,1,1),plot(p(i,:))
+                    % title('next pure spectrum and std dev. spectrum')
+                    % subplot(2,1,2),plot(s(i,:))
+                    % pause
+
+
+                    [mp(i),imp(i)]=max(p(i,:));
+                end
+
+
+                for i=1:nr,
+                    impi=imp(i);
+                    sp(1:nrow,i)=d(1:nrow,impi);
+                end
+
+                % figure(nr+1)
+                sp=normv2(sp');
+                % plot(sp')
+
+            end
+
+            function [dm]=wmat(c,imp,irank,jvar)
+                dm(1,1)=c(jvar,jvar);
+                for k=2:irank,
+                    kvar=imp(k-1);
+                    dm(1,k)=c(jvar,kvar);
+                    dm(k,1)=c(kvar,jvar);
+                    for kk=2:irank,
+                        kkvar=imp(kk-1);
+                        dm(k,kk)=c(kvar,kkvar);
+                    end
+                end
+            end
+
+            function [sn]=normv2(s)
+                % normalitzacio s=s/sqrt(sum(si)2))
+                [m,n]=size(s);
+                for i=1:m,
+                    sr=sqrt(sum(s(i,:).*s(i,:)));
+                    sn(i,:)=s(i,:)./sr;
+                end
+            end
+
+
+            % ****************************** Subroutine****************************
+
+            function [X] = makeXfromABC(A,B,C)
+
+                na = size(A,1);
+                nb = size(B,1);
+                nc = size(C,1);
+                ncomp = size(C,2);
+
+                X = zeros(na,nb,nc);
+                for i = 1:nc
+                    Di = zeros(ncomp,ncomp);
+                    for ii = 1:ncomp
+                        Di(ii,ii) = C(i,ii);
+                    end
+                    X(:,:,i) = A*Di*B(:,:,i)';
+                end
+
+                X = permute(X,[3,2,1]);
+            end
+
+            function x=LSI(E,f,G,h);
+
+                % x=LSI(E,f,G,h);
+                % Solves problem LSI min(norm(Ex-f))) subject to Gx>h
+                %
+                % From Lawson & Hanson 74, p. 167
+                %
+                % Copyright 1998
+                % Rasmus Bro
+                % rasmus@optimax.dk/rb@kvl.dk
+
+                [I,J]=size(E);
+                r=rank(E);
+                [u,s,v]=svd(E,0);
+
+                K1=v(:,1:r);
+                Q1=u(:,1:r);
+                R=s(1:r,1:r);
+                f1=Q1'*f;
+                GKR=G*K1*pinv(R);
+                z=ldp(GKR,h-GKR*f1);
+
+                %z=Ry-f1;
+
+                y=pinv(R)*(z+f1);
+                x=K1*y;
+                function b=ldp(G,h);
+
+                    % find min||b|| subject to Gb=>h
+                    %
+                    % From Lawson & Hanson 74, p. 165
+                    %
+                    % Copyright 1998
+                    % Rasmus Bro
+                    % rasmus@optimax.dk/rb@kvl.dk
+
+
+                    [I,J]=size(G);
+                    E=[G';h'];
+                    f=[zeros(J,1);1];
+                    uhat=fastnnls(E'*E,E'*f);
+                    r=E*uhat-f;
+
+                    if norm(r)==0
+                        disp(' No solution to LDP problem')
+                    elseif r(J+1)~=0
+                        b=-r(1:J)/r(J+1);
+                    else
+                        b=NaN;
+                    end
+                end
+            end
+
+            function [K, Pset] = fcnnls(C, A, CtC, CtA)
+                % NNLS using normal equations and the fast combinatorial strategy
+                %
+                % I/O: [K, Pset] = fcnnls(C, A);
+                % K = fcnnls(C, A);
+                %
+                % C is the nObs x lVar coefficient matrix
+                % A is the nObs x pRHS matrix of observations
+                % K is the lVar x pRHS solution matrix
+                % Pset is the lVar x pRHS passive set logical array
+                %
+                % Pset: set of passive sets, one for each column
+                % Fset: set of column indices for solutions that have not yet converged
+                % Hset: set of column indices for currently infeasible solutions
+                % Jset: working set of column indices for currently optimal solutions
+                %
+                % Implementation is based on [1] with bugfixes, direct passing of sufficient stats,
+                % and preserving the active set over function calls.
+                %
+                % [1] Van Benthem, M. H., & Keenan, M. R. (2004). Fast algorithm for the
+                %   solution of large‐scale non‐negativity‐constrained least squares problems.
+                %   Journal of Chemometrics: A Journal of the Chemometrics Society, 18(10), 441-450.
+
+
+                % Check the input arguments for consistency and initialize
+                if nargin == 2
+                    error(nargchk(2,2,nargin))
+                    [nObs, lVar] = size(C);
+
+                    if size(A,1)~= nObs, error('C and A have imcompatible sizes'), end
+                    if size(C,1) == size(C,2)
+                        %         warning('A square matrix "C" was input, ensure this is on purpose.')
+                    end
+                    pRHS = size(A,2);
+                    % Precompute parts of pseudoinverse
+                    CtC = C'*C; CtA = C'*A;
+                else
+                    [lVar,pRHS] = size(CtA);
+
+                end
+
+                if nargin == 2 && size(C,1) == size(C,2)
+                    warning('fcnnls - The coefficient matrix (C) was square - is this true or are you passing C''C?')
+                end
+
+                W = zeros(lVar, pRHS);
+                iter = 0;
+                maxiter = 6*lVar;
+
+
+                % Obtain the initial feasible solution and corresponding passive set
+                K = cssls(CtC, CtA);
+                Pset=K>0;
+                K(~Pset) = 0;
+                D=K;
+                Fset = find(~all(Pset));
+
+                % Active set algorithm for NNLS main loop
+                iter_outer = 1;
+                while ~isempty(Fset) && iter_outer < maxiter
+                    iter_outer = iter_outer + 1;
+                    % Solve for the passive variables (uses subroutine below)
+                    K(:,Fset) = cssls(CtC, CtA(:,Fset), Pset(:,Fset));
+                    % Find any infeasible solutions
+                    %     Hset = Fset(find(any(K(:,Fset) < 0)));
+                    Hset = Fset((any(K(:,Fset) < 0)));
+
+                    % Make infeasible solutions feasible (standard NNLS inner loop)
+                    if ~isempty(Hset)
+                        nHset = length(Hset);
+                        alpha = zeros(lVar, nHset);
+
+                        while ~isempty(Hset) && (iter < maxiter)
+                            iter = iter + 1;
+                            alpha(:,1:nHset) = Inf;
+                            % Find indices of negative variables in passive set
+                            [i, j] = find(Pset(:,Hset) & (K(:,Hset) < 0));
+                            hIdx = sub2ind([lVar nHset], i, j);
+                            %             if length(i) ~= length(j)
+                            %                 keyboard
+                            %             end
+                            %             negIdx = sub2ind(size(K), i, Hset(j)'); % org
+                            negIdx = sub2ind(size(K), i, reshape(Hset(j),size(i)));  % jlh mod
+                            alpha(hIdx) = D(negIdx)./(D(negIdx) - K(negIdx));
+                            [alphaMin,minIdx] = min(alpha(:,1:nHset));
+                            alpha(:,1:nHset) = repmat(alphaMin, lVar, 1);
+                            D(:,Hset) = D(:,Hset)-alpha(:,1:nHset).*(D(:,Hset)-K(:,Hset));
+                            idx2zero = sub2ind(size(D), minIdx, Hset);
+                            D(idx2zero) = 0;
+                            Pset(idx2zero) = 0;
+                            K(:, Hset) = cssls(CtC, CtA(:,Hset), Pset(:,Hset));
+                            Hset = find(any(K < 0));
+                            nHset = length(Hset);
+                        end
+                    end
+                    % Make sure the solution has converged
+                    %if iter == maxiter, warning('Maximum number iterations exceeded'), end
+                    % Check solutions for optimality
+                    W(:,Fset) = CtA(:,Fset)-CtC*K(:,Fset);
+                    Jset = find(all(~Pset(:,Fset).*W(:,Fset) <= 0));
+                    Fset = setdiff(Fset, Fset(Jset));
+                    % For non-optimal solutions, add the appropriate variable to Pset
+                    if ~isempty(Fset)
+                        [mx, mxidx] = max(~Pset(:,Fset).*W(:,Fset));
+                        Pset(sub2ind([lVar pRHS], mxidx, Fset)) = 1;
+                        D(:,Fset) = K(:,Fset);
+                    end
+                end
+
+                % ****************************** Subroutine****************************
+                function [K] = cssls(CtC, CtA, Pset)
+                    % Solve the set of equations CtA = CtC*K for the variables in set Pset
+                    % using the fast combinatorial approach
+                    K = zeros(size(CtA));
+                    if (nargin == 2) || isempty(Pset) || all(Pset(:))
+                        K = CtC\CtA; % Not advisable if matrix is close to singular or badly scaled
+                        %     K = pinv(CtC)*CtA;
+                    else
+                        [lVar, pRHS] = size(Pset);
+                        codedPset = 2.^(lVar-1:-1:0)*Pset;
+                        [sortedPset, sortedEset] = sort(codedPset);
+                        breaks = diff(sortedPset);
+                        breakIdx = [0 find(breaks) pRHS];
+                        for k = 1:length(breakIdx)-1
+                            cols2solve = sortedEset(breakIdx(k)+1:breakIdx(k+1));
+                            vars = Pset(:,sortedEset(breakIdx(k)+1));
+                            K(vars,cols2solve) = CtC(vars,vars)\CtA(vars,cols2solve);
+                            %         K(vars,cols2solve) = pinv(CtC(vars,vars))*CtA(vars,cols2solve);
+                        end
+                    end
+                end
+            end
+        end
+
+        function model = SIT_MCR(X,Fac,options)
+            % I/O
+            %
+            % I:
+            % X(elutiontimes x samples x spectral chanels) = Low rank chromatographic data set
+            % Fac = Number of latent variables to be fitted
+            % options.MaxIter   :   maximum number of iterations (default = 1000)
+            % options.ConvCrit  :   convergence criterion (default = 1e-09)
+            % options.Constr    :   [Spectra, Elutionprofiles&Scores]
+            %                       e.g [1 1] (default)
+            %                       0 = unconstrained
+            %                       1 = non-negativity
+            % options.Init      :   Initialization
+            %                   :   0 = random
+            %                   :   1 = pure sample (default)
+            %                   :   2 = custom (requires options.InitLoads)
+            % options.InitLoads :   insert customized Loadings
+            % options.classify  :   1 = Runs a DeepNeuralNetwork to classify
+            %                           elutionprofiles as '0=weird, 1=peak, 2=cutoff, 3=baseline';
+            % options.PeakshapeCorrection : If set to vals > 1, tri-linearity
+            %                               constraint is relaxed.
+            % options.compression : makes sense if size(X,i)*size(X,j) << size(X,k)
+            % options.compression.do : 0 = no compression, 1 = compression
+            % options.compression.basis: orthogonal basis for compression
+            %
+            %O:
+            %model.spectra                      = (Fac x spectral chanels)
+            %model.elutionprofiles              = (elutiontimes x Fac x samples)
+            %model.scores                       = (Fac x samples)
+            %model.detail.fit.X_sum_sq          = Total Sum of Squares;
+            %model.detail.fit.res_sum_sq        = Residual Sum of Squares;
+            %model.detail.fit.PercVar           = Explained Variance [%];
+            %model.detail.fit.fitdif            = Final difference in Fit;
+            %model.detail.lossfunc              = Loss Function values over all iterations;
+            %model.detail.lossfunc_dif          = Fit difference over all iterations;
+            %model.detail.residuals             = Residuals in dimensions of input data;
+            %model.detail.iterations            = Number of Iterations
+            %model.detail.time                  = Computation time;
+            %model.detail.Profiles.PeakType     = PeakType
+            %model.detail.Profiles.Niceness     = Niceness
+            %model.detail.Profiles.PeakTypeHelp = '0 = weird, 1 = peak, 2 = cutoff, 3 = baseline';
+
+
+            %% Unfold X
+            X1 = X;
+            mgc    = size(X1);
+
+            X1 = reshape(X1,[mgc(1)*mgc(2) mgc(3)]);
+            %'Mode 1 is elution time * sample
+            %'Mode 2 is m/z fragments
+            %% Arguments and option settings
+            tic()
+            ncomp           = Fac;
+            if nargin < 3
+                init        = 1;
+                maxit       = 1000;
+                constr      = [1 1];
+                convcrit    = 1e-09;
+                pccf        = 1;
+            else
+                if isfield(options,'Init')
+                    init        = options.Init;
+                else
+                    init    = 0;
+                end
+                maxit       = options.MaxIter;
+                if isfield(options,'Constr')
+                    constr      = options.Constr;
+                else
+                    constr = [1 1];
+                end
+                convcrit    = options.ConvCrit;
+                if isfield(options,'PeakshapeCorrection')
+                    pccf        = options.PeakshapeCorrection;
+                else
+                    pccf = 1;
+                end
+                if isfield(options,'compression')
+                    compression = options.compression.do;
+                    basis_f     = options.compression.basis;
+                else
+                    compression = 0;
+                end
+
+                if ~isfield(options,'classify');
+                    options.classify = 1;
+                end
+            end
+
+            %% Initialization of S or C
+            % pure sample / spectra
+
+            if init == 0
+                CB = randn(size(X1,1),ncomp);
+            elseif init == 1
+                [CB0,ind]=pure(X1,ncomp,10);
+                CB = CB0';
+                [S0,ind]=pure(X1',ncomp,10);
+                S = S0';
+            elseif init == 2
+                S = options.InitLoads;
+                StS = S'*S;
+                StXt = S'*X1';
+                CB = fcnnls([],[],StS,StXt)';
+            end
+
+            SST = sum(X1.^2,'all');
+            SSE = zeros(1,2);
+            SSE(1) = 2*SST;
+            SSE(2) = SST;
+            fitdif = SSE(1)-SSE(2);
+            fit = [];
+            iter = [];
+            tictic = 0;
+
+            %% calculating mcr solution
+            % X = CS'
+            % S has Norm 1
+            % S = S/||S||
+            % X*S*pinv(S'S) = C --> pinv(S'S)*S'X' = C;
+            % pinv(C'C)*C'*X = S --> pinv(C'C)*C'*X = S;
+            it = 0;
+            while fitdif > convcrit & it < maxit
+                it = it+1;
+                CtC = CB'*CB;
+                CtX = CB'*X1;
+                if      constr(1) == 0
+                    S = CtX'*pinv(CtC);
+                    S(S<0) = 0;
+                elseif  constr(1) == 1
+                    if compression == 0
+                        try
+                            S = fcnnls(CB, X1, CtC, CtX)';
+                            for k =1:ncomp
+                                if sum(S(:,k)) == 0
+                                    S(:,k) = rand(1,size(S,1));
+                                end
+                            end
+                        catch
+                            CB = randn(size(CB));
+                            CtC = CB'*CB;
+                            CtX = CB'*X1;
+                            S = fcnnls(CB, X1, CtC, CtX)';
+                        end
+                    elseif compression == 1
+                        E = CB;
+                        f = X1;
+                        for jj = 1:Fac
+                            S(jj,:) = LSI(E,f(:,jj),basis_f,0);
+                        end
+                    end
+                    for k = 1:ncomp
+                        S(:,k) = S(:,k)*1/norm(S(:,k),'fro');
+                    end
+                end
+                StS = S'*S;
+                StXt = S'*X1';
+                if      constr(2) == 0
+                    CB = StXt'*pinv(StS);
+                    CB(CB<0) = 0;
+                elseif  constr(2) == 1
+                    try
+                        CB = fcnnls([],[],StS,StXt)';
+                    catch
+                        S = randn(size(S));
+                        for k = 1:ncomp
+                            S(:,k) = S(:,k)*1/norm(S(:,k),'fro');
+                        end
+                        StS = S'*S;
+                        StXt = S'*X1';
+                        CB = fcnnls([],[],StS,StXt)';
+                    end
+                end
+
+
+                %% Shift invariant trilinearity on CB
+                copt1 = [];
+                Bft = [];
+                Cft = [];
+                Bneu = {};
+                Cneu = [];
+
+                for j = 1:ncomp;
+
+                    y= reshape(CB(:,j),mgc(1),mgc(2));%shiftmap(copt1');
+                    %making trilinearity for shifted data
+
+                    [U,T,V] = svd(y,'econ');
+
+                    %
+                    %storing results as elutionprofiles and relative concentrations
+                    Bft = U(:,1:pccf)*T(1:pccf,1:pccf);
+                    Cft = V(:,1:pccf)';
+                    %shifting back
+                    Bneu{1,j} = Bft*Cft;
+                    Bneu{1,j} = Bneu{1,j}(1:mgc(1),:);
+                end
+                %reshaping to get CB back
+                BB = zeros(mgc(1),mgc(2), ncomp);
+                for i = 1:(ncomp)
+                    BB(:,:,i) = Bneu{1,i};
+                end
+                %           zeroforcing !!!! Spielwiese !!!!
+                CBneu = reshape(BB,mgc(1)*mgc(2),ncomp);
+                CB = CBneu;
+
+
+                %evaluating loss function
+                SSE(2) = SSE(1);
+                %SSE(1) = sum((X1-CB*S').^2,'all');
+                SSE(1) = SST+sum(sum((CB'*CB) .*(S'*S)))-2*sum((X1*S) .* CB,'all');
+                fit(it) = (1-SSE(1)/SST)*100;
+                fitdif(it) = abs((1-SSE(2)/SST)*100-(1-SSE(1)/SST)*100);
+
+            end
+            %Outputs
+            % StS = S'*S;
+            % StXt = S'*X1';
+            % CB = Alg.fcnnls([],[],StS,StXt)';
+            CB = reshape(CB,mgc(1),mgc(2),ncomp);
+            model.spectra   = S;
+            for i = 1:size(CB ,3)
+                for ii = 1:size(CB ,2)
+                    Cneu(ii,i) = norm(squeeze(CB(:,ii,i)),'fro');
+                    CB(:,ii,i) = CB(:,ii,i)./Cneu(ii,i);
+                end
+            end
+            model.elutionprofiles  = CB;
+            model.elutionprofiles  = permute(model.elutionprofiles,[1 3 2]);
+            % for i = 1:size(BB,3)
+            %     for ii = 1:size(BB,2)
+            %         Cneu(ii,i) = norm(squeeze(BB(:,ii,i)),'fro');
+            %     end
+            % end
+            model.scores   = Cneu;
+
+            model.detail.fit.X_sum_sq        = SST;
+            model.detail.fit.res_sum_sq      = SSE(1);
+            model.detail.fit.PercVar         = fit(end);
+            model.detail.fit.fitdif          = fitdif(end);
+            % model.detail.dif1                = dif1;
+            % model.detail.lossfunc          = fit;
+            % model.detail.lossfunc_dif      = fitdif;
+            %         % !!! Spielwiese
+            % model.detail.dif1              = dif1;
+            % model.detail.dif2              = dif2;
+            % Xhat                = makeXfromABC(model.spectra,model.elutionprofiles,model.scores);
+            % model.detail.residuals     = permute(X,[2 1 3])-Xhat;
+
+            model.detail.iterations    = it;
+            model.detail.time          = toc()
+            if options.classify == 1
+                load('DeepNet2018b_1.mat');
+                [~,PeakType,Niceness] = assessprof(model.elutionprofiles ,FinalDeepNet);
+                model.detail.Profiles.PeakType = PeakType;
+                model.detail.Profiles.Niceness = Niceness;
+                model.detail.Profiles.PeakTypeHelp = '0 = weird, 1 = peak, 2 = cutoff, 3 = baseline';
+            end
+
+
+
+
+
+            %%
+
+
+            function [y,ya,p] = shiftmap(x,p)
+                %
+                %  For calculating |fft| and phase map:
+                %  INPUTS:
+                %     x = MxN operates on the columns
+                %  OPTIONAL INPUT:
+                %     p = nonnegative scalar length of padding for fft
+                %         if not included p = 2.^nextpow2(M);
+                %  OUTPUTS:
+                %     y = |fft(x)|
+                %    ya = phase map of FFT: fft(x)./|fft(x)|
+                %     p = p = 2.^nextpow2(n); [used when (p) not input].
+                %
+                %I/O: [y,ya,p] = shiftmap(x,p);
+                %
+                %  For calculating shifted profiles from |fft| and phase map:
+                %  INPUTS:
+                %     y = |fft(xhat)|, e.g., Xhat from a 1 PC PCA model of |FFT(x)|
+                %    ya = phase map of FFT: fft(x)./|fft(x)|
+                %  OUTPUTS:
+                %     x = real(ifft(y.*ya))
+                %
+                %I/O: [x] = shiftmap(y,ya);
+
+                yr    = 1e-6;             %regularization for angle map
+
+                m     = size(x);
+
+                if nargin<2||isscalar(p)  %calculate |FFT| and angle map
+                    if nargin<2
+                        p   = 2.^nextpow2(m(1));
+                    end
+
+                    % FFT
+                    %             if isdataset(x)
+                    %                 z   = fft(x.data,p);
+                    %             else
+                    %     z   = fft(x,p);       %assume x is class double
+                    z = fft(x);
+                    %             end
+                    % |FFT| and angle map
+                    y     = abs(z);
+                    a     = y;
+                    a(y<yr)   = yr;
+                    ya    = z./a;
+                else %p = ya (phase map)
+
+                    % IFFT
+                    %             if isdataset(x)
+                    %                 y   = real(ifft(x.data.*p));
+                    %             else
+                    y   = real(ifft(x.*p));   %assume x is class double
+                    %            end
+                    ya    = [];
+                    p     = [];
+
+
+                end
+            end
+
+            function [sp,imp]=pure(d,nr,f)
+                % [sp,imp]=pure(d,nr,f)
+                % sp purest row/column profiles
+                % imp indexes of purest variables
+                % d data matrix; nr (rank) number of pure components to search
+                % if d(nspectra,nwave) imp gives purest nwave => sp are conc. profiles (nr,nspectra)
+                % if d(nwave,nspectra) imp gives purest nspectra => sp are spectra profiles (nr,nwave)
+                % f percent of noise allowed respect maximum of the average spectrum given in % (i.e. 1% or 0.1%))
+
+                [nrow,ncol]=size(d);
+
+
+                % calculation of the purity spectrum
+
+                f=f/100;
+                s=std(d);
+                m=mean(d);
+                ll=s.*s+m.*m;
+                f=max(m)*f;
+                p=s./(m+f);
+
+                [mp,imp(1)]=max(p);
+
+                % calculation of the correlation matrix
+                % l=sqrt(m.*m+(s+f).*(s+f));
+
+                l=sqrt((s.*s+(m+f).*(m+f)));
+                % dl=d./(l'*ones(1,ncol));
+                for j=1:ncol,
+                    dl(:,j)=d(:,j)./l(j);
+                end
+                c=(dl'*dl)./nrow;
+
+                % calculation of the weights
+                % first weight
+
+                w(1,:)=ll./(l.*l);
+                p(1,:)=w(1,:).*p(1,:);
+                s(1,:)=w(1,:).*s(1,:);
+                % figure(1)
+                % subplot(3,1,1),plot(m)
+                % title('unweigthed mean, std and first pure spectrum')
+                % subplot(3,1,2),plot(s)
+                % subplot(3,1,3),plot(p)
+
+                % pause
+
+                % next weights
+
+
+                for i=2:nr,
+
+                    for j=1:ncol,
+                        [dm]=wmat(c,imp,i,j);
+                        w(i,j)=det(dm);
+                        p(i,j)=p(1,j).*w(i,j);
+                        s(i,j)=s(1,j).*w(i,j);
+                    end
+
+                    % next purest and standard deviation spectrum
+
+                    % plot(p(i,:))
+                    % plot(s(i,:))
+                    % title('sd and purest spectrum')
+                    % figure(i)
+                    % subplot(2,1,1),plot(p(i,:))
+                    % title('next pure spectrum and std dev. spectrum')
+                    % subplot(2,1,2),plot(s(i,:))
+                    % pause
+
+
+                    [mp(i),imp(i)]=max(p(i,:));
+                end
+
+
+                for i=1:nr,
+                    impi=imp(i);
+                    sp(1:nrow,i)=d(1:nrow,impi);
+                end
+
+                % figure(nr+1)
+                sp=normv2(sp');
+                % plot(sp')
+
+            end
+
+            function [dm]=wmat(c,imp,irank,jvar)
+                dm(1,1)=c(jvar,jvar);
+                for k=2:irank,
+                    kvar=imp(k-1);
+                    dm(1,k)=c(jvar,kvar);
+                    dm(k,1)=c(kvar,jvar);
+                    for kk=2:irank,
+                        kkvar=imp(kk-1);
+                        dm(k,kk)=c(kvar,kkvar);
+                    end
+                end
+            end
+
+            function [sn]=normv2(s)
+                % normalitzacio s=s/sqrt(sum(si)2))
+                [m,n]=size(s);
+                for i=1:m,
+                    sr=sqrt(sum(s(i,:).*s(i,:)));
+                    sn(i,:)=s(i,:)./sr;
+                end
+            end
+
+
+            % ****************************** Subroutine****************************
+
+            function [X] = makeXfromABC(A,B,C)
+
+                na = size(A,1);
+                nb = size(B,1);
+                nc = size(C,1);
+                ncomp = size(C,2);
+
+                X = zeros(na,nb,nc);
+                for i = 1:nc
+                    Di = zeros(ncomp,ncomp);
+                    for ii = 1:ncomp
+                        Di(ii,ii) = C(i,ii);
+                    end
+                    X(:,:,i) = A*Di*B(:,:,i)';
+                end
+
+                X = permute(X,[3,2,1]);
+            end
+
+            function x=LSI(E,f,G,h);
+
+                % x=LSI(E,f,G,h);
+                % Solves problem LSI min(norm(Ex-f))) subject to Gx>h
+                %
+                % From Lawson & Hanson 74, p. 167
+                %
+                % Copyright 1998
+                % Rasmus Bro
+                % rasmus@optimax.dk/rb@kvl.dk
+
+                [I,J]=size(E);
+                r=rank(E);
+                [u,s,v]=svd(E,0);
+
+                K1=v(:,1:r);
+                Q1=u(:,1:r);
+                R=s(1:r,1:r);
+                f1=Q1'*f;
+                GKR=G*K1*pinv(R);
+                z=ldp(GKR,h-GKR*f1);
+
+                %z=Ry-f1;
+
+                y=pinv(R)*(z+f1);
+                x=K1*y;
+                function b=ldp(G,h);
+
+                    % find min||b|| subject to Gb=>h
+                    %
+                    % From Lawson & Hanson 74, p. 165
+                    %
+                    % Copyright 1998
+                    % Rasmus Bro
+                    % rasmus@optimax.dk/rb@kvl.dk
+
+
+                    [I,J]=size(G);
+                    E=[G';h'];
+                    f=[zeros(J,1);1];
+                    uhat=fastnnls(E'*E,E'*f);
+                    r=E*uhat-f;
+
+                    if norm(r)==0
+                        disp(' No solution to LDP problem')
+                    elseif r(J+1)~=0
+                        b=-r(1:J)/r(J+1);
+                    else
+                        b=NaN;
+                    end
+                end
+            end
+
+            function [K, Pset] = fcnnls(C, A, CtC, CtA)
+                % NNLS using normal equations and the fast combinatorial strategy
+                %
+                % I/O: [K, Pset] = fcnnls(C, A);
+                % K = fcnnls(C, A);
+                %
+                % C is the nObs x lVar coefficient matrix
+                % A is the nObs x pRHS matrix of observations
+                % K is the lVar x pRHS solution matrix
+                % Pset is the lVar x pRHS passive set logical array
+                %
+                % Pset: set of passive sets, one for each column
+                % Fset: set of column indices for solutions that have not yet converged
+                % Hset: set of column indices for currently infeasible solutions
+                % Jset: working set of column indices for currently optimal solutions
+                %
+                % Implementation is based on [1] with bugfixes, direct passing of sufficient stats,
+                % and preserving the active set over function calls.
+                %
+                % [1] Van Benthem, M. H., & Keenan, M. R. (2004). Fast algorithm for the
+                %   solution of large‐scale non‐negativity‐constrained least squares problems.
+                %   Journal of Chemometrics: A Journal of the Chemometrics Society, 18(10), 441-450.
+
+
+                % Check the input arguments for consistency and initialize
+                if nargin == 2
+                    error(nargchk(2,2,nargin))
+                    [nObs, lVar] = size(C);
+
+                    if size(A,1)~= nObs, error('C and A have imcompatible sizes'), end
+                    if size(C,1) == size(C,2)
+                        %         warning('A square matrix "C" was input, ensure this is on purpose.')
+                    end
+                    pRHS = size(A,2);
+                    % Precompute parts of pseudoinverse
+                    CtC = C'*C; CtA = C'*A;
+                else
+                    [lVar,pRHS] = size(CtA);
+
+                end
+
+                if nargin == 2 && size(C,1) == size(C,2)
+                    warning('fcnnls - The coefficient matrix (C) was square - is this true or are you passing C''C?')
+                end
+
+                W = zeros(lVar, pRHS);
+                iter = 0;
+                maxiter = 6*lVar;
+
+
+                % Obtain the initial feasible solution and corresponding passive set
+                K = cssls(CtC, CtA);
+                Pset=K>0;
+                K(~Pset) = 0;
+                D=K;
+                Fset = find(~all(Pset));
+
+                % Active set algorithm for NNLS main loop
+                iter_outer = 1;
+                while ~isempty(Fset) && iter_outer < maxiter
+                    iter_outer = iter_outer + 1;
+                    % Solve for the passive variables (uses subroutine below)
+                    K(:,Fset) = cssls(CtC, CtA(:,Fset), Pset(:,Fset));
+                    % Find any infeasible solutions
+                    %     Hset = Fset(find(any(K(:,Fset) < 0)));
+                    Hset = Fset((any(K(:,Fset) < 0)));
+
+                    % Make infeasible solutions feasible (standard NNLS inner loop)
+                    if ~isempty(Hset)
+                        nHset = length(Hset);
+                        alpha = zeros(lVar, nHset);
+
+                        while ~isempty(Hset) && (iter < maxiter)
+                            iter = iter + 1;
+                            alpha(:,1:nHset) = Inf;
+                            % Find indices of negative variables in passive set
+                            [i, j] = find(Pset(:,Hset) & (K(:,Hset) < 0));
+                            hIdx = sub2ind([lVar nHset], i, j);
+                            %             if length(i) ~= length(j)
+                            %                 keyboard
+                            %             end
+                            %             negIdx = sub2ind(size(K), i, Hset(j)'); % org
+                            negIdx = sub2ind(size(K), i, reshape(Hset(j),size(i)));  % jlh mod
+                            alpha(hIdx) = D(negIdx)./(D(negIdx) - K(negIdx));
+                            [alphaMin,minIdx] = min(alpha(:,1:nHset));
+                            alpha(:,1:nHset) = repmat(alphaMin, lVar, 1);
+                            D(:,Hset) = D(:,Hset)-alpha(:,1:nHset).*(D(:,Hset)-K(:,Hset));
+                            idx2zero = sub2ind(size(D), minIdx, Hset);
+                            D(idx2zero) = 0;
+                            Pset(idx2zero) = 0;
+                            K(:, Hset) = cssls(CtC, CtA(:,Hset), Pset(:,Hset));
+                            Hset = find(any(K < 0));
+                            nHset = length(Hset);
+                        end
+                    end
+                    % Make sure the solution has converged
+                    %if iter == maxiter, warning('Maximum number iterations exceeded'), end
+                    % Check solutions for optimality
+                    W(:,Fset) = CtA(:,Fset)-CtC*K(:,Fset);
+                    Jset = find(all(~Pset(:,Fset).*W(:,Fset) <= 0));
+                    Fset = setdiff(Fset, Fset(Jset));
+                    % For non-optimal solutions, add the appropriate variable to Pset
+                    if ~isempty(Fset)
+                        [mx, mxidx] = max(~Pset(:,Fset).*W(:,Fset));
+                        Pset(sub2ind([lVar pRHS], mxidx, Fset)) = 1;
+                        D(:,Fset) = K(:,Fset);
+                    end
+                end
+
+                % ****************************** Subroutine****************************
+                function [K] = cssls(CtC, CtA, Pset)
+                    % Solve the set of equations CtA = CtC*K for the variables in set Pset
+                    % using the fast combinatorial approach
+                    K = zeros(size(CtA));
+                    if (nargin == 2) || isempty(Pset) || all(Pset(:))
+                        K = CtC\CtA; % Not advisable if matrix is close to singular or badly scaled
+                        %     K = pinv(CtC)*CtA;
+                    else
+                        [lVar, pRHS] = size(Pset);
+                        codedPset = 2.^(lVar-1:-1:0)*Pset;
+                        [sortedPset, sortedEset] = sort(codedPset);
+                        breaks = diff(sortedPset);
+                        breakIdx = [0 find(breaks) pRHS];
+                        for k = 1:length(breakIdx)-1
+                            cols2solve = sortedEset(breakIdx(k)+1:breakIdx(k+1));
+                            vars = Pset(:,sortedEset(breakIdx(k)+1));
+                            K(vars,cols2solve) = CtC(vars,vars)\CtA(vars,cols2solve);
+                            %         K(vars,cols2solve) = pinv(CtC(vars,vars))*CtA(vars,cols2solve);
+                        end
+                    end
+                end
+            end
+        end
 
         function [pks,locs_y,locs_x]=peaks2(data,varargin)
             % Find local peaks in 2D data.

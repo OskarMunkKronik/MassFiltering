@@ -63,18 +63,9 @@ DAC = DAC.run_mcr(filtered); % run MCR
 
 %%
 filtered = 1; % 1 = Run MCR on pre-filtered data
+model_type = "MCR"; % Defines whether "MCR" or "SIT" should be used as model
 DAC = DAC.get_fac(filtered); % get the rank for determining the number of components in MCR
 DAC = DAC.run_mcr(filtered); % run MCR
-
-% to be added: DAC.run_sit --> shift invariant trilinearity in cases where
-% rotational ambiguity is a problem
-
-% filtered = 0;
-% DAC = DAC.get_fac(filtered);
-% DAC = DAC.run_sit(filtered);
-% filtered = 1;
-% DAC = DAC.get_fac(filtered);
-% DAC = DAC.run_sit(filtered);
 
 %% Extract the resulting mass spectra and save them to the repository
 

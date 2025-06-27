@@ -20,7 +20,7 @@ classdef DataAnalysis_class
 
 
             disp('please select "options_SIT.txt" file.')
-            [filename,pathname] = uigetfile();
+            [filename,pathname] = uigetfile('*txt');
             filename = fullfile(pathname,filename);
             opt_table  = readtable(filename);
 
@@ -37,7 +37,7 @@ classdef DataAnalysis_class
             clear opt_table
 
             disp('please select "options_MF.txt" file.')
-            [filename,pathname] = uigetfile();
+            [filename,pathname] = uigetfile('*txt');
             filename = fullfile(pathname,filename);
             opt_table  = readtable(filename);
 
@@ -51,7 +51,7 @@ classdef DataAnalysis_class
             clear opt_table
 
             disp('please select "suspect_list.xlsx" file.')
-            [filename,pathname] = uigetfile();
+            [filename,pathname] = uigetfile('*xlsx');
             filename = fullfile(pathname,filename);
             suspect_list_raw = readtable(filename,'ReadVariableNames', true);
 
@@ -62,7 +62,7 @@ classdef DataAnalysis_class
             %define column names for analyte names
             column_name_id = input('define column names for analyte names: '); % uncomment this
             eval(strcat('suspect_info_id = suspect_list_raw.',column_name_id))
-            sanitizeString = @(str) regexprep(str,{'-',',',';','[',']','(',')',' ','+'},'');
+            sanitizeString = @(str) regexprep(str,{,',',';','[',']','(',')',' ','+'},'');
             suspect_info_id = cellfun(sanitizeString,suspect_info_id,'UniformOutput',false);
 
             obj.SuspectList.suspect_info_id = suspect_info_id;
@@ -84,23 +84,35 @@ classdef DataAnalysis_class
             mz2 = obj.MF_obj.Reshaped_Data{1,2};
             axis_mz2 = obj.MF_obj.mz_temp{1,2};
 
-            obj.options_SIT.peak_position = zeros(size(obj.SuspectList.suspect_info_masses,1),2);
-
-            for i = 1:size(obj.SuspectList.suspect_info_masses,1)
+            obj.options_SIT.peak_position    = zeros(size(obj.SuspectList.suspect_info_masses,1),2);
+            obj.options_SIT.peak_position_rt = zeros(size(obj.SuspectList.suspect_info_masses,1),2);
+             
+            len_mz  = length(unique(regexprep(obj.SuspectList.suspect_info_id, '_peak_\d+$', '')));%size(obj.SuspectList.suspect_info_masses,1);
+            for i = 1:len_mz
 
                 mz_target = obj.SuspectList.suspect_info_masses(i);
 
                 [dif_mz1,ind_mz1] = min(abs(axis_mz1-mz_target));
 
-                if dif_mz1 >= threshold_mass
-                    obj.options_SIT.peak_position(i,1) = [];
-                    obj.options_SIT.peak_position(i,2) = [];
+                if (dif_mz1/mz_target*10^6) >=  threshold_mass
+%                     obj.options_SIT.peak_position(i,1) = 0;%[];
+%                     obj.options_SIT.peak_position(i,2) = 0;% [];
                     display('suspect NOT found')
                 else
+                    %%
+%                     [ints,x,y] = obj.peaks2(squeeze(double(mz1(:,:,ind_mz1))),'MinPeakHeight',threshold_peak);
+  
+                    %% Smooths data before peak detections
+%                     clf
+                    z  = smoothdata(squeeze(double(mz1(:,:,ind_mz1))),1,'gaussian',7);
+                    [ints,x,y] = obj.peaks2(z,'MinPeakHeight',threshold_peak);
 
-                    [ints,x,y] = obj.peaks2(squeeze(double(mz1(:,:,ind_mz1))),'MinPeakHeight',threshold_peak);
-                    try
+%%
+%                     try
                         [~,inds] = sort(ints,'descend');
+                        if length(inds)>20
+                        inds = inds(1:20);
+                        end 
                         ints = ints(inds);
                         x = x(inds);
                         y = y(inds);
@@ -140,23 +152,79 @@ classdef DataAnalysis_class
                             close all
 
                         elseif screening == 1
-
+                            
                             if ~isempty(x)
+                                len = size(obj.SuspectList.suspect_info_masses,1);
+                                len_x = length(x);
+                                
+                               if len_x>1
+%                                    for ii = 1:len_x
+                                       
+%                                         if ii == 1
+                                           cleanName = regexprep(obj.SuspectList.suspect_info_id{i}, '_peak_*\d+$', '');
+%                                            Ind = find(ismember(obj.SuspectList.suspect_info_id,obj.SuspectList.suspect_info_id{i}),1,'first');
+%                                            obj.SuspectList.suspect_info_id{i}      = [cleanName,'_peak_',num2str(1)];  
+                                           
+                                            newName = {[cleanName,'_peak_1']};
+                                            Ind = find(ismember(obj.SuspectList.suspect_info_id,newName));
+                                            obj.options_SIT.peak_position(i,1) = x(1);
+                                           obj.options_SIT.peak_position(i,2) = y(1);
+                                            if ~isempty(Ind)
+                                                obj.SuspectList.suspect_info_id(Ind)  = newName;
+                                            else
+
+                                             obj.SuspectList.suspect_info_id(i)      = newName; %Fix this! 
+                                            end 
+%                                         else 
+%                                         end 
+%                                    end 
+                                        for ii = 2:len_x
+                                            
+                                            newName = {[cleanName,'_peak_',num2str(ii)]};
+                                            Ind = find(ismember(obj.SuspectList.suspect_info_id,newName));
+                                            if ~isempty(Ind)
+                                                obj.SuspectList.suspect_info_id(Ind)  = newName;
+                                                obj.options_SIT.peak_position(Ind,:)       = [x(ii),y(ii)];
+                                                obj.options_SIT.peak_position_rt(Ind,:)      = zeros(1,2);
+                                                obj.SuspectList.suspect_info_masses(Ind)  = repelem(mz_target,1);
+                                            else
+
+                                             obj.SuspectList.suspect_info_id(len+ii-1)         = newName; %Fix this! 
+                                             obj.options_SIT.peak_position(len+ii-1,:)         = [x(ii),y(ii)];
+                                             obj.options_SIT.peak_position_rt(len+ii-1,:)      = zeros(1,2);
+                                             obj.SuspectList.suspect_info_masses(len+ii-1)     = repelem(mz_target,1);
+                                            end  
+                                        end 
+                                     
+                                    
+                                   
+                               else 
                                 disp(i)
                                 disp('suspect found')
                                 obj.options_SIT.peak_position(i,1) = x(1);
                                 obj.options_SIT.peak_position(i,2) = y(1);
-                            else
+                                cleanName = regexprep(obj.SuspectList.suspect_info_id{i}, '_peak_*\d+$', '');
+                                obj.SuspectList.suspect_info_id(i)      = {[cleanName,'_peak_1']};
+                 
+                             end 
+                               
+                                else
                                 disp(i)
                                 disp('suspect NOT found')
-                                obj.options_SIT.peak_position(i,1) = [];
-                                obj.options_SIT.peak_position(i,2) = [];
+%                                 obj.options_SIT.peak_position(i,1) = 0;%[];
+%                                 obj.options_SIT.peak_position(i,2) = 0;%[];
                             end
 
-                        end
+%                         end
                     end
                 end
             end
+            dropZeros                                       = sum(obj.options_SIT.peak_position,2)==0;
+            obj.options_SIT.peak_position(dropZeros,:)      = [];
+            obj.options_SIT.peak_position_rt(dropZeros,:)      = [];
+            obj.SuspectList.suspect_info_masses(dropZeros)  = [];
+            obj.SuspectList.suspect_info_id(dropZeros)      = [];
+
         end
 
         function obj = RunMassFiltering(obj,filtered,cutoff)
@@ -196,6 +264,14 @@ classdef DataAnalysis_class
             end
 
             for i = 1:size(obj.SuspectList.suspect_info_masses,1)
+               %Oskar edit cosme
+                totalLength = size(obj.SuspectList.suspect_info_masses,1);  % Replace with the actual length
+                  
+                if mod(i, 10) == 0 || i == totalLength
+                    fprintf('Processing %d / %d\n', i, totalLength);
+                end
+                % Your processing code here
+               
                 if ~isempty(obj.options_SIT.peak_position(i,1))
                     mz_target = obj.SuspectList.suspect_info_masses(i);
                     xmin = obj.options_SIT.peak_position(i,1)-obj.options_MF.xwindow;
@@ -229,11 +305,11 @@ classdef DataAnalysis_class
 
                     if ~isempty(cutoff)
                         mz1_temp = double(mz1_temp);
-                        mz1_temp = mz1_temp(:,:,full(axis_mz1_temp) < mz_target+50);
+                        mz1_temp = mz1_temp(:,:,full(axis_mz1_temp) < mz_target+cutoff);
                         mz2_temp = double(mz2_temp);
-                        mz2_temp = mz2_temp(:,:,full(axis_mz2_temp) < mz_target+50);
-                        axis_mz1_temp = axis_mz1_temp(axis_mz1_temp < mz_target+50);
-                        axis_mz2_temp = axis_mz2_temp(axis_mz2_temp < mz_target+50);
+                        mz2_temp = mz2_temp(:,:,full(axis_mz2_temp) < mz_target+cutoff);
+                        axis_mz1_temp = axis_mz1_temp(axis_mz1_temp < mz_target+cutoff);
+                        axis_mz2_temp = axis_mz2_temp(axis_mz2_temp < mz_target+cutoff);
                     end
 
                     [~,ind_target_1_temp] = min(abs(axis_mz1_temp-mz_target));
@@ -244,12 +320,13 @@ classdef DataAnalysis_class
                     ref_profile_lc_2 = ref_profile_lc_2./norm(ref_profile_lc_2,'fro');
 
                     %% mz-1
-
-                    test_profiles_lc2 = squeeze(sum(double(mz1_temp),2));
+                    test_profiles_lc2 = zeros(size(mz1_temp,[1,3]));
+                    test_profiles_lc2(:,:) = squeeze(sum(double(mz1_temp),2));
                     t_norm_lc2 = vecnorm(test_profiles_lc2,2,1);
                     test_profiles_lc2 = test_profiles_lc2./t_norm_lc2;
-
-                    test_profiles_lc1 = squeeze(sum(double(mz1_temp),1));
+                    
+                    test_profiles_lc1 = zeros(size(mz1_temp,[2,3]));
+                    test_profiles_lc1(:,:) = squeeze(sum(double(mz1_temp),1));
                     t_norm_lc1 = vecnorm(test_profiles_lc1,2,1);
                     test_profiles_lc1 = test_profiles_lc1./t_norm_lc1;
 
@@ -271,12 +348,13 @@ classdef DataAnalysis_class
                     axis_mz1_filtered = axis_mz1_temp(masses_to_keep);
 
                     %% mz-2
-
-                    test_profiles_lc2 = squeeze(sum(double(mz2_temp),2));
+                    test_profiles_lc2 = zeros(size(mz2_temp,[1,3]));
+                    test_profiles_lc2(:,:) = squeeze(sum(double(mz2_temp),2));
                     t_norm_lc2 = vecnorm(test_profiles_lc2,2,1);
                     test_profiles_lc2 = test_profiles_lc2./t_norm_lc2;
-
-                    test_profiles_lc1 = squeeze(sum(double(mz2_temp),1));
+                    
+                    test_profiles_lc1 = zeros(size(mz2_temp,[2,3]));
+                    test_profiles_lc1(:,:) = squeeze(sum(double(mz2_temp),1));
                     t_norm_lc1 = vecnorm(test_profiles_lc1,2,1);
                     test_profiles_lc1 = test_profiles_lc1./t_norm_lc1;
 
@@ -295,7 +373,8 @@ classdef DataAnalysis_class
                     mz2_el_profil_lc2 = sum(sum(double(mz2_filtered),3),2);
                     axis_mz2_filtered = axis_mz2_temp(masses_to_keep);
 
-
+                    peak_position     = obj.options_SIT.peak_position(i,:);
+                    peak_position_rt  = obj.options_SIT.peak_position_rt(i,:);
                     %% saving the output
                     cd(obj.BasePath)
                     mkdir(obj.SuspectList.suspect_info_id{i})
@@ -320,7 +399,10 @@ classdef DataAnalysis_class
                     eval('output_MF.mz_target = mz_target;')
                     eval('output_MF.ind_mz1 = ind_mz1;')
                     eval('output_MF.ind_mz2 = ind_mz2;')
-
+                    
+                    eval('output_MF.peak_position = peak_position;')
+                    eval('output_MF.peak_position_rt = peak_position_rt;')
+                    
                     if filtered == 0
                         save('output_MF','output_MF')
                     else
@@ -344,6 +426,7 @@ classdef DataAnalysis_class
                 else
                     load('output_ignore_MF.mat')
                 end
+                if~isempty(output_MF.mz2_mass_spectrum)
                 [Fac11,Fac12,Fac13,Fac21,Fac22,Fac23] = obj.get_rank_of_modes(output_MF,filtered);
                 obj.options_SIT.Fac(1,i) = min(Fac11,Fac12);
                 obj.options_SIT.Fac(2,i) = min(Fac21,Fac22);
@@ -353,6 +436,7 @@ classdef DataAnalysis_class
                     writetable(factors_of_modes,'factors_of_modes','FileType','spreadsheet')
                 else
                     writetable(factors_of_modes,'factors_of_modes_MF_SIT','FileType','spreadsheet')
+                end
                 end
                 cd ..
 
@@ -380,6 +464,7 @@ classdef DataAnalysis_class
                 else
                     load('output_ignore_MF.mat');
                 end
+                if ~isempty(output_MF.mz2_mass_spectrum)
                 for ii = 1:size(modes,1)
                     if filtered == 0
                         eval("data = output_MF.([modes{ii} '_temp']);")
@@ -412,7 +497,7 @@ classdef DataAnalysis_class
                             cd(obj.SuspectList.suspect_info_id{i})
                         elseif model_type == "SIT"
                             for iii = 1:5
-                                model{iii} = SIT(data,Fac,options);
+                                model{iii} = DataAnalysis_class.SIT(data,Fac,options);
                                 display(['compound: ' num2str(i) '/' num2str(size(obj.SuspectList.suspect_info_masses,1)) ' mode: ' num2str(ii) ' model: ' num2str(iii)])
                             end
                             cd(obj.BasePath)
@@ -433,9 +518,11 @@ classdef DataAnalysis_class
                         else
                             save('output_MF_SIT.mat','output_SIT');
                         end
-                        cd ..
-                    end
+                    end 
                 end
+                       
+                    end
+                 cd ..
             end
 
         end
@@ -2178,7 +2265,7 @@ classdef DataAnalysis_class
 
                 %%
             else
-
+ 
                 % do for mz1
                 data = double(outputstruc.mz1_filtered);
 
@@ -2250,6 +2337,7 @@ classdef DataAnalysis_class
                     i = i+1;
                 end
                 Fac23 = i;
+               
             end
 
         end
@@ -2309,8 +2397,8 @@ classdef DataAnalysis_class
                 int2 = zeros(length(mz_axis2), 1); % Initialize column 'mz1' with zeros
             end
 
-            keep_mz1 = mz_axis1 < mz_target+50;
-            keep_mz2 = mz_axis2 < mz_target+50;
+            keep_mz1 = mz_axis1 < mz_target+cutoff;
+            keep_mz2 = mz_axis2 < mz_target+cutoff;
 
             int1(1:length(outputstruc.mz1_mass_spectrum(keep_mz1))) = outputstruc.mz1_mass_spectrum(keep_mz1);
             int1 = int1./(max(int1))*1000;
@@ -2368,14 +2456,14 @@ classdef DataAnalysis_class
             int1 = int1(int1>max(int1)*0.001);
             int2 = int2(int2>max(int2)*0.001);
 
-            int1 = int1(mz1 < (inputStruc.mz_target+50));
-            int2 = int2(mz2 < (inputStruc.mz_target+50));
+            int1 = int1(mz1 < (inputStruc.mz_target+cutoff));
+            int2 = int2(mz2 < (inputStruc.mz_target+cutoff));
 
             int1 = int1./max(int1)*1000;
             int2 = int2./max(int2)*1000;
 
-            mz1  = mz1(mz1 < (inputStruc.mz_target+50));
-            mz2  = mz2(mz2 < (inputStruc.mz_target+50));
+            mz1  = mz1(mz1 < (inputStruc.mz_target+cutoff));
+            mz2  = mz2(mz2 < (inputStruc.mz_target+cutoff));
 
 
             [~,ind] = sort(int1,'descend');

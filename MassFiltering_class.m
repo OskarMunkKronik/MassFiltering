@@ -61,7 +61,7 @@ classdef MassFiltering_class
             % interactively select a search window if rt2_window has not
             % been defined
             if ~exist('rt2_window','var')
-                close all
+%                 close all
                 f = figure;
                 plot(obj.TIC_RT2_Data{1})
                 while ishandle(f)
@@ -71,6 +71,7 @@ classdef MassFiltering_class
                     if numel(xlimInput) == 2
                         % set the new limits
                         xlim(xlimInput)
+                        close(f)
                     else
                         display('Invalid input.')
                     end
@@ -89,10 +90,13 @@ classdef MassFiltering_class
 
                     while length(data_temp_tic_ms{1}) > i+rt2_window(2)
                         ind_slices_to_cut(ii) = i;
-                        ind_min = find(data_temp_tic_ms{1}(i+rt2_window(1):i+rt2_window(2)) == min(data_temp_tic_ms{1}(i+rt2_window(1):i+rt2_window(2))));
+                        ind_min      = find(data_temp_tic_ms{1}(i+rt2_window(1):i+rt2_window(2)) == min(data_temp_tic_ms{1}(i+rt2_window(1):i+rt2_window(2))));
                         data_new{ii} = data_temp_tic_ms{1}(i:i+rt2_window(1)+ind_min);
                         rt_new{ii}   = obj.rt_axis(i:i+rt2_window(1)+ind_min);
                         masses{ii}   = data_temp{1}(:,i:i+rt2_window(1)+ind_min);
+%                         data_new{ii} = data_temp_tic_ms{1}(i:i+ind_min-1);
+%                         rt_new{ii}   = obj.rt_axis(i:i+ind_min-1);
+%                         masses{ii}   = data_temp{1}(:,i:i+ind_min-1);
                         ii = ii+1;
                         i = i+rt2_window(1)+ind_min+1;
                     end
